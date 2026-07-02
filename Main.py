@@ -1,96 +1,70 @@
-import os
-import sqlite3
 from datetime import datetime
 from io import BytesIO
 
 import pandas as pd
 import streamlit as st
+from supabase import create_client
 
 
-APP_TITLE = "📦 안전창고 재고관리 V4.0"
-DB_PATH = "database/inventory_v4.db"
+APP_TITLE = "📦 안전창고 재고관리 V5.0"
 
 
 st.set_page_config(
-    page_title="안전창고 재고관리 V4.0",
+    page_title="안전창고 재고관리 V5.0",
     page_icon="📦",
     layout="wide"
 )
 
 
-# =========================
-# 기본 함수
-# =========================
-def make_dirs():
-    os.makedirs("database", exist_ok=True)
-    os.makedirs("excel", exist_ok=True)
+@st.cache_resource
+def get_supabase():
+    url = st.secrets.get("SUPABASE_URL", "")
+    key = st.secrets.get("SUPABASE_KEY", "")
+
+    if not url or not key:
+        st.error("Supabase 설정값이 없습니다. Streamlit Secrets를 확인하세요.")
+        st.stop()
+
+    return create_client(url, key)
 
 
-def conn():
-    make_dirs()
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+supabase = get_supabase()
 
 
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def init_db():
-    db = conn()
-    cur = db.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        warehouse TEXT NOT NULL,
-        item_name TEXT NOT NULL,
-        min_stock INTEGER NOT NULL,
-        target_stock INTEGER NOT NULL,
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT,
-        updated_at TEXT
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        check_time TEXT NOT NULL,
-        checker TEXT NOT NULL,
-        warehouse TEXT NOT NULL,
-        item_id INTEGER NOT NULL,
-        item_name TEXT NOT NULL,
-        current_stock INTEGER NOT NULL,
-        min_stock INTEGER NOT NULL,
-        target_stock INTEGER NOT NULL,
-        purchase_qty INTEGER NOT NULL
-    )
-    """)
-
-    db.commit()
-    db.close()
-
-
-def get_items(active_only=True):
-    db = conn()
-    query = "SELECT * FROM items"
-    if active_only:
-        query += " WHERE is_active = 1"
-    query += " ORDER BY warehouse, item_name, id"
-    df = pd.read_sql(query, db)
-    db.close()
-    return df
-
-
-def get_records():
-    db = conn()
-    df = pd.read_sql("SELECT * FROM records ORDER BY check_time DESC", db)
-    db.close()
-    return df
+def to_excel(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Sheet1")
+    return output.getvalue()
 
 
 def calc_purchase_qty(current_stock, target_stock):
     return max(int(target_stock) - int(current_stock), 0)
+
+
+def get_items(active_only=True):
+    query = supabase.table("items").select("*")
+
+    if active_only:
+        query = query.eq("is_active", 1)
+
+    data = query.order("warehouse").order("item_name").execute().data
+    return pd.DataFrame(data)
+
+
+def get_records():
+    data = (
+        supabase.table("records")
+        .select("*")
+        .order("check_time", desc=True)
+        .execute()
+        .data
+    )
+    return pd.DataFrame(data)
 
 
 def get_latest_stock():
@@ -106,21 +80,19 @@ def get_latest_stock():
         item_id = int(item["id"])
 
         if records.empty:
-            latest_record = pd.DataFrame()
+            matched = pd.DataFrame()
         else:
-            latest_record = records[records["item_id"] == item_id]
+            matched = records[records["item_id"] == item_id]
 
-        if latest_record.empty:
+        if matched.empty:
             current_stock = 0
             check_time = ""
             checker = ""
         else:
-            last = latest_record.sort_values("check_time").tail(1).iloc[0]
-            current_stock = int(last["current_stock"])
-            check_time = last["check_time"]
-            checker = last["checker"]
-
-        purchase_qty = calc_purchase_qty(current_stock, int(item["target_stock"]))
+            latest = matched.sort_values("check_time").tail(1).iloc[0]
+            current_stock = int(latest["current_stock"])
+            check_time = latest["check_time"]
+            checker = latest["checker"]
 
         result.append({
             "최종수정일": check_time,
@@ -131,106 +103,64 @@ def get_latest_stock():
             "현재재고": current_stock,
             "최소재고": int(item["min_stock"]),
             "적정재고": int(item["target_stock"]),
-            "구매 필요량": purchase_qty
+            "구매 필요량": calc_purchase_qty(current_stock, item["target_stock"])
         })
 
     return pd.DataFrame(result).sort_values(["창고", "품목명"])
 
 
-def to_excel(df):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Sheet1")
-    return output.getvalue()
-
-
 def add_item(warehouse, item_name, min_stock, target_stock):
-    db = conn()
-    cur = db.cursor()
-    cur.execute("""
-    INSERT INTO items
-    (warehouse, item_name, min_stock, target_stock, is_active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 1, ?, ?)
-    """, (
-        warehouse,
-        item_name,
-        int(min_stock),
-        int(target_stock),
-        now(),
-        now()
-    ))
-    db.commit()
-    db.close()
+    supabase.table("items").insert({
+        "warehouse": warehouse,
+        "item_name": item_name,
+        "min_stock": int(min_stock),
+        "target_stock": int(target_stock),
+        "is_active": 1,
+        "created_at": now(),
+        "updated_at": now()
+    }).execute()
 
 
 def update_item(item_id, warehouse, item_name, min_stock, target_stock, is_active):
-    db = conn()
-    cur = db.cursor()
-    cur.execute("""
-    UPDATE items
-    SET warehouse = ?,
-        item_name = ?,
-        min_stock = ?,
-        target_stock = ?,
-        is_active = ?,
-        updated_at = ?
-    WHERE id = ?
-    """, (
-        warehouse,
-        item_name,
-        int(min_stock),
-        int(target_stock),
-        1 if is_active else 0,
-        now(),
-        int(item_id)
-    ))
-    db.commit()
-    db.close()
+    supabase.table("items").update({
+        "warehouse": warehouse,
+        "item_name": item_name,
+        "min_stock": int(min_stock),
+        "target_stock": int(target_stock),
+        "is_active": 1 if is_active else 0,
+        "updated_at": now()
+    }).eq("id", int(item_id)).execute()
 
 
 def delete_item(item_id):
-    db = conn()
-    cur = db.cursor()
-    cur.execute("DELETE FROM records WHERE item_id = ?", (int(item_id),))
-    cur.execute("DELETE FROM items WHERE id = ?", (int(item_id),))
-    db.commit()
-    db.close()
+    supabase.table("records").delete().eq("item_id", int(item_id)).execute()
+    supabase.table("items").delete().eq("id", int(item_id)).execute()
 
 
 def save_stock(checker, warehouse, rows):
-    db = conn()
-    cur = db.cursor()
     check_time = now()
 
+    insert_rows = []
+
     for r in rows:
-        cur.execute("""
-        INSERT INTO records
-        (check_time, checker, warehouse, item_id, item_name,
-         current_stock, min_stock, target_stock, purchase_qty)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            check_time,
-            checker,
-            warehouse,
-            int(r["item_id"]),
-            r["item_name"],
-            int(r["current_stock"]),
-            int(r["min_stock"]),
-            int(r["target_stock"]),
-            int(r["purchase_qty"])
-        ))
+        insert_rows.append({
+            "check_time": check_time,
+            "checker": checker,
+            "warehouse": warehouse,
+            "item_id": int(r["item_id"]),
+            "item_name": r["item_name"],
+            "current_stock": int(r["current_stock"]),
+            "min_stock": int(r["min_stock"]),
+            "target_stock": int(r["target_stock"]),
+            "purchase_qty": int(r["purchase_qty"])
+        })
 
-    db.commit()
-    db.close()
+    if insert_rows:
+        supabase.table("records").insert(insert_rows).execute()
 
-
-# =========================
-# 실행 시작
-# =========================
-init_db()
 
 st.title(APP_TITLE)
-st.caption("1창고, 2창고 안전창고 재고 확인 및 구매 필요량 관리용")
+st.caption("Supabase 연동 버전 / PC·휴대폰 실시간 데이터 공유")
 
 menu = st.sidebar.radio(
     "메뉴 선택",
@@ -242,9 +172,6 @@ checker = st.sidebar.text_input("입력자 이름", placeholder="예: 홍길동"
 st.divider()
 
 
-# =========================
-# 재고조사
-# =========================
 if menu == "📦 재고조사":
     st.header("📦 재고조사")
 
@@ -255,15 +182,20 @@ if menu == "📦 재고조사":
     warehouse = st.selectbox("창고 선택", ["1창고", "2창고"])
 
     items = get_items(active_only=True)
-    items = items[items["warehouse"] == warehouse]
 
     if items.empty:
         st.info("등록된 품목이 없습니다. 품목관리에서 품목을 추가하세요.")
         st.stop()
 
+    items = items[items["warehouse"] == warehouse]
+
+    if items.empty:
+        st.info(f"{warehouse}에 등록된 품목이 없습니다.")
+        st.stop()
+
     latest = get_latest_stock()
 
-    st.info("현재재고를 입력하면 구매 필요량이 자동 계산됩니다. 저장 후 다음 접속 시 마지막 재고가 그대로 표시됩니다.")
+    st.info("현재재고를 입력하면 구매 필요량이 자동 계산됩니다.")
 
     save_rows = []
 
@@ -272,11 +204,7 @@ if menu == "📦 재고조사":
             item_id = int(item["id"])
 
             matched = latest[latest["품목ID"] == item_id] if not latest.empty else pd.DataFrame()
-
-            if matched.empty:
-                default_stock = 0
-            else:
-                default_stock = int(matched.iloc[0]["현재재고"])
+            default_stock = 0 if matched.empty else int(matched.iloc[0]["현재재고"])
 
             col1, col2, col3, col4 = st.columns([3, 1, 1, 2])
 
@@ -299,7 +227,7 @@ if menu == "📦 재고조사":
                     label_visibility="collapsed"
                 )
 
-            purchase_qty = calc_purchase_qty(current_stock, int(item["target_stock"]))
+            purchase_qty = calc_purchase_qty(current_stock, item["target_stock"])
             st.caption(f"구매 필요량: {purchase_qty}")
             st.divider()
 
@@ -320,9 +248,6 @@ if menu == "📦 재고조사":
         st.rerun()
 
 
-# =========================
-# 재고현황
-# =========================
 elif menu == "📋 재고현황":
     st.header("📋 재고현황")
 
@@ -362,9 +287,6 @@ elif menu == "📋 재고현황":
     )
 
 
-# =========================
-# 구매필요목록
-# =========================
 elif menu == "🛒 구매필요목록":
     st.header("🛒 구매필요목록")
 
@@ -402,9 +324,6 @@ elif menu == "🛒 구매필요목록":
         )
 
 
-# =========================
-# 품목관리
-# =========================
 elif menu == "⚙ 품목관리":
     st.header("⚙ 품목관리")
 
@@ -430,12 +349,15 @@ elif menu == "⚙ 품목관리":
                 st.warning("적정재고는 최소재고보다 크거나 같아야 합니다.")
             else:
                 items = get_items(active_only=False)
-                duplicated = items[
-                    (items["warehouse"] == warehouse) &
-                    (items["item_name"] == item_name)
-                ]
+                duplicate = pd.DataFrame()
 
-                if not duplicated.empty:
+                if not items.empty:
+                    duplicate = items[
+                        (items["warehouse"] == warehouse) &
+                        (items["item_name"] == item_name)
+                    ]
+
+                if not duplicate.empty:
                     st.warning("같은 창고에 동일한 품목명이 있습니다.")
                 else:
                     add_item(warehouse, item_name, min_stock, target_stock)
@@ -477,6 +399,7 @@ elif menu == "⚙ 품목관리":
                     ["1창고", "2창고"],
                     index=0 if selected_item["warehouse"] == "1창고" else 1
                 )
+
                 edit_name = st.text_input("품목명", value=selected_item["item_name"])
                 edit_min = st.number_input("최소재고", min_value=0, step=1, value=int(selected_item["min_stock"]))
                 edit_target = st.number_input("적정재고", min_value=0, step=1, value=int(selected_item["target_stock"]))
@@ -544,9 +467,6 @@ elif menu == "⚙ 품목관리":
                     st.rerun()
 
 
-# =========================
-# 조사이력
-# =========================
 elif menu == "🕒 조사이력":
     st.header("🕒 조사이력")
 
@@ -556,10 +476,10 @@ elif menu == "🕒 조사이력":
         st.info("조사 이력이 없습니다.")
         st.stop()
 
-    items = get_items(active_only=True)
+    active_items = get_items(active_only=True)
 
-    if not items.empty:
-        active_ids = items["id"].tolist()
+    if not active_items.empty:
+        active_ids = active_items["id"].tolist()
         records = records[records["item_id"].isin(active_ids)]
 
     warehouse_filter = st.selectbox("창고 선택", ["전체", "1창고", "2창고"])
