@@ -6,13 +6,25 @@ import streamlit as st
 from supabase import create_client
 
 
-APP_TITLE = "📦 안전창고 재고관리 V5.0"
+APP_TITLE = "📦 안전창고 재고관리 V5.1"
+
+PURCHASE_ACCOUNTS = [
+    "안전용품",
+    "소방용품",
+    "전기자재",
+    "기계자재",
+    "시설유지",
+    "소모품",
+    "사무용품",
+    "청소용품",
+    "기타",
+]
 
 
 st.set_page_config(
-    page_title="안전창고 재고관리 V5.0",
+    page_title="안전창고 재고관리 V5.1",
     page_icon="📦",
-    layout="wide"
+    layout="wide",
 )
 
 
@@ -46,6 +58,10 @@ def calc_purchase_qty(current_stock, target_stock):
     return max(int(target_stock) - int(current_stock), 0)
 
 
+def calc_total_price(purchase_qty, unit_price):
+    return int(purchase_qty) * int(unit_price)
+
+
 def get_items(active_only=True):
     query = supabase.table("items").select("*")
 
@@ -53,7 +69,21 @@ def get_items(active_only=True):
         query = query.eq("is_active", 1)
 
     data = query.order("warehouse").order("item_name").execute().data
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+
+    if df.empty:
+        return df
+
+    if "unit_price" not in df.columns:
+        df["unit_price"] = 0
+
+    if "purchase_account" not in df.columns:
+        df["purchase_account"] = "기타"
+
+    df["unit_price"] = df["unit_price"].fillna(0).astype(int)
+    df["purchase_account"] = df["purchase_account"].fillna("기타")
+
+    return df
 
 
 def get_records():
@@ -94,6 +124,10 @@ def get_latest_stock():
             check_time = latest["check_time"]
             checker = latest["checker"]
 
+        purchase_qty = calc_purchase_qty(current_stock, item["target_stock"])
+        unit_price = int(item.get("unit_price", 0))
+        total_price = calc_total_price(purchase_qty, unit_price)
+
         result.append({
             "최종수정일": check_time,
             "입력자": checker,
@@ -103,32 +137,39 @@ def get_latest_stock():
             "현재재고": current_stock,
             "최소재고": int(item["min_stock"]),
             "적정재고": int(item["target_stock"]),
-            "구매 필요량": calc_purchase_qty(current_stock, item["target_stock"])
+            "구매 필요량": purchase_qty,
+            "단가": unit_price,
+            "총 금액": total_price,
+            "구매계정": item.get("purchase_account", "기타"),
         })
 
     return pd.DataFrame(result).sort_values(["창고", "품목명"])
 
 
-def add_item(warehouse, item_name, min_stock, target_stock):
+def add_item(warehouse, item_name, min_stock, target_stock, unit_price, purchase_account):
     supabase.table("items").insert({
         "warehouse": warehouse,
         "item_name": item_name,
         "min_stock": int(min_stock),
         "target_stock": int(target_stock),
+        "unit_price": int(unit_price),
+        "purchase_account": purchase_account,
         "is_active": 1,
         "created_at": now(),
-        "updated_at": now()
+        "updated_at": now(),
     }).execute()
 
 
-def update_item(item_id, warehouse, item_name, min_stock, target_stock, is_active):
+def update_item(item_id, warehouse, item_name, min_stock, target_stock, unit_price, purchase_account, is_active):
     supabase.table("items").update({
         "warehouse": warehouse,
         "item_name": item_name,
         "min_stock": int(min_stock),
         "target_stock": int(target_stock),
+        "unit_price": int(unit_price),
+        "purchase_account": purchase_account,
         "is_active": 1 if is_active else 0,
-        "updated_at": now()
+        "updated_at": now(),
     }).eq("id", int(item_id)).execute()
 
 
@@ -139,7 +180,6 @@ def delete_item(item_id):
 
 def save_stock(checker, warehouse, rows):
     check_time = now()
-
     insert_rows = []
 
     for r in rows:
@@ -152,19 +192,23 @@ def save_stock(checker, warehouse, rows):
             "current_stock": int(r["current_stock"]),
             "min_stock": int(r["min_stock"]),
             "target_stock": int(r["target_stock"]),
-            "purchase_qty": int(r["purchase_qty"])
+            "purchase_qty": int(r["purchase_qty"]),
         })
 
     if insert_rows:
         supabase.table("records").insert(insert_rows).execute()
 
 
+def money_text(value):
+    return f"{int(value):,} 원"
+
+
 st.title(APP_TITLE)
-st.caption("Supabase 연동 버전 / PC·휴대폰 실시간 데이터 공유")
+st.caption("Supabase 연동 / 단가·구매계정·총금액 반영 버전")
 
 menu = st.sidebar.radio(
     "메뉴 선택",
-    ["📦 재고조사", "📋 재고현황", "🛒 구매필요목록", "⚙ 품목관리", "🕒 조사이력"]
+    ["📦 재고조사", "📋 재고현황", "🛒 구매필요목록", "⚙ 품목관리", "🕒 조사이력"],
 )
 
 checker = st.sidebar.text_input("입력자 이름", placeholder="예: 홍길동")
@@ -194,15 +238,13 @@ if menu == "📦 재고조사":
         st.stop()
 
     latest = get_latest_stock()
+    save_rows = []
 
     st.info("현재재고를 입력하면 구매 필요량이 자동 계산됩니다.")
-
-    save_rows = []
 
     with st.form("stock_form"):
         for _, item in items.iterrows():
             item_id = int(item["id"])
-
             matched = latest[latest["품목ID"] == item_id] if not latest.empty else pd.DataFrame()
             default_stock = 0 if matched.empty else int(matched.iloc[0]["현재재고"])
 
@@ -210,6 +252,7 @@ if menu == "📦 재고조사":
 
             with col1:
                 st.markdown(f"### {item['item_name']}")
+                st.caption(f"구매계정: {item.get('purchase_account', '기타')} / 단가: {int(item.get('unit_price', 0)):,}원")
 
             with col2:
                 st.write(f"최소: {int(item['min_stock'])}")
@@ -224,7 +267,7 @@ if menu == "📦 재고조사":
                     step=1,
                     value=default_stock,
                     key=f"stock_{item_id}",
-                    label_visibility="collapsed"
+                    label_visibility="collapsed",
                 )
 
             purchase_qty = calc_purchase_qty(current_stock, item["target_stock"])
@@ -237,7 +280,7 @@ if menu == "📦 재고조사":
                 "current_stock": current_stock,
                 "min_stock": int(item["min_stock"]),
                 "target_stock": int(item["target_stock"]),
-                "purchase_qty": purchase_qty
+                "purchase_qty": purchase_qty,
             })
 
         submitted = st.form_submit_button("✅ 재고조사 저장")
@@ -265,25 +308,29 @@ elif menu == "📋 재고현황":
     view = df[[
         "최종수정일",
         "입력자",
+        "구매계정",
         "창고",
         "품목명",
         "현재재고",
         "적정재고",
-        "구매 필요량"
+        "구매 필요량",
+        "단가",
+        "총 금액",
     ]]
 
     st.dataframe(view, use_container_width=True, hide_index=True)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("전체 품목 수", len(view))
     col2.metric("구매 필요 품목", int((view["구매 필요량"] > 0).sum()))
     col3.metric("구매 불필요 품목", int((view["구매 필요량"] == 0).sum()))
+    col4.metric("총 구매예상금액", money_text(view["총 금액"].sum()))
 
     st.download_button(
         "📥 재고현황 엑셀 다운로드",
         data=to_excel(view),
         file_name="안전창고_재고현황.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 
@@ -307,27 +354,42 @@ elif menu == "🛒 구매필요목록":
         st.success("구매가 필요한 품목이 없습니다.")
     else:
         view = df[[
+            "구매계정",
             "창고",
             "품목명",
             "현재재고",
             "적정재고",
-            "구매 필요량"
+            "구매 필요량",
+            "단가",
+            "총 금액",
         ]]
 
         st.dataframe(view, use_container_width=True, hide_index=True)
+
+        total_amount = int(view["총 금액"].sum())
+        st.metric("총 구매예상금액", money_text(total_amount))
+
+        account_summary = (
+            view.groupby("구매계정", as_index=False)["총 금액"]
+            .sum()
+            .sort_values("총 금액", ascending=False)
+        )
+
+        st.subheader("구매계정별 합계")
+        st.dataframe(account_summary, use_container_width=True, hide_index=True)
 
         st.download_button(
             "📥 구매필요목록 엑셀 다운로드",
             data=to_excel(view),
             file_name="안전창고_구매필요목록.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
 
 elif menu == "⚙ 품목관리":
     st.header("⚙ 품목관리")
 
-    tab1, tab2, tab3 = st.tabs(["➕ 품목 추가", "✏️ 품목 수정 / 미사용", "🗑️ 품목 삭제"])
+    tab1, tab2, tab3 = st.tabs(["➕ 품목 추가", "✏️ 품목 일괄 수정", "🗑️ 품목 삭제"])
 
     with tab1:
         st.subheader("품목 추가")
@@ -337,6 +399,8 @@ elif menu == "⚙ 품목관리":
             item_name = st.text_input("품목명")
             min_stock = st.number_input("최소재고", min_value=0, step=1)
             target_stock = st.number_input("적정재고", min_value=0, step=1)
+            unit_price = st.number_input("단가", min_value=0, step=100)
+            purchase_account = st.selectbox("구매계정", PURCHASE_ACCOUNTS, index=PURCHASE_ACCOUNTS.index("기타"))
 
             submitted = st.form_submit_button("➕ 품목 추가")
 
@@ -353,75 +417,119 @@ elif menu == "⚙ 품목관리":
 
                 if not items.empty:
                     duplicate = items[
-                        (items["warehouse"] == warehouse) &
-                        (items["item_name"] == item_name)
+                        (items["warehouse"] == warehouse)
+                        & (items["item_name"] == item_name)
                     ]
 
                 if not duplicate.empty:
                     st.warning("같은 창고에 동일한 품목명이 있습니다.")
                 else:
-                    add_item(warehouse, item_name, min_stock, target_stock)
+                    add_item(warehouse, item_name, min_stock, target_stock, unit_price, purchase_account)
                     st.success("품목이 추가되었습니다.")
                     st.rerun()
 
     with tab2:
-        st.subheader("품목 수정 / 미사용 처리")
+        st.subheader("품목 일괄 수정")
+        st.info("표에서 품목명, 최소재고, 적정재고, 단가, 구매계정, 사용 여부를 직접 수정한 후 저장하세요.")
 
         items = get_items(active_only=False)
 
         if items.empty:
             st.info("등록된 품목이 없습니다.")
         else:
-            view = items.copy()
-            view["사용여부"] = view["is_active"].map({1: "사용", 0: "미사용"})
+            edit_df = items[[
+                "id",
+                "warehouse",
+                "item_name",
+                "min_stock",
+                "target_stock",
+                "unit_price",
+                "purchase_account",
+                "is_active",
+            ]].copy()
 
-            st.dataframe(
-                view[["id", "warehouse", "item_name", "min_stock", "target_stock", "사용여부"]].rename(columns={
-                    "id": "ID",
-                    "warehouse": "창고",
-                    "item_name": "품목명",
-                    "min_stock": "최소재고",
-                    "target_stock": "적정재고"
-                }),
+            edit_df = edit_df.rename(columns={
+                "id": "ID",
+                "warehouse": "창고",
+                "item_name": "품목명",
+                "min_stock": "최소재고",
+                "target_stock": "적정재고",
+                "unit_price": "단가",
+                "purchase_account": "구매계정",
+                "is_active": "사용 중",
+            })
+
+            edit_df["사용 중"] = edit_df["사용 중"].map({1: True, 0: False})
+            edit_df["구매계정"] = edit_df["구매계정"].fillna("기타")
+
+            edited_df = st.data_editor(
+                edit_df,
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
+                disabled=["ID"],
+                num_rows="fixed",
+                column_config={
+                    "창고": st.column_config.SelectboxColumn("창고", options=["1창고", "2창고"]),
+                    "품목명": st.column_config.TextColumn("품목명"),
+                    "최소재고": st.column_config.NumberColumn("최소재고", min_value=0, step=1),
+                    "적정재고": st.column_config.NumberColumn("적정재고", min_value=0, step=1),
+                    "단가": st.column_config.NumberColumn("단가", min_value=0, step=100),
+                    "구매계정": st.column_config.SelectboxColumn("구매계정", options=PURCHASE_ACCOUNTS),
+                    "사용 중": st.column_config.CheckboxColumn("사용 중"),
+                },
             )
 
-            options = items["id"].astype(str) + " | " + items["warehouse"] + " | " + items["item_name"]
-            selected = st.selectbox("수정할 품목 선택", options)
+            if st.button("💾 변경사항 저장"):
+                error = False
+                update_count = 0
 
-            selected_id = int(selected.split(" | ")[0])
-            selected_item = items[items["id"] == selected_id].iloc[0]
+                for _, row in edited_df.iterrows():
+                    item_id = int(row["ID"])
+                    warehouse = str(row["창고"]).strip()
+                    item_name = str(row["품목명"]).strip()
+                    min_stock = int(row["최소재고"])
+                    target_stock = int(row["적정재고"])
+                    unit_price = int(row["단가"])
+                    purchase_account = str(row["구매계정"]).strip() or "기타"
+                    is_active = bool(row["사용 중"])
 
-            with st.form("edit_item"):
-                edit_warehouse = st.selectbox(
-                    "창고",
-                    ["1창고", "2창고"],
-                    index=0 if selected_item["warehouse"] == "1창고" else 1
-                )
+                    if not item_name:
+                        st.warning("품목명은 비워둘 수 없습니다.")
+                        error = True
+                        break
 
-                edit_name = st.text_input("품목명", value=selected_item["item_name"])
-                edit_min = st.number_input("최소재고", min_value=0, step=1, value=int(selected_item["min_stock"]))
-                edit_target = st.number_input("적정재고", min_value=0, step=1, value=int(selected_item["target_stock"]))
-                edit_active = st.checkbox("사용 중", value=bool(selected_item["is_active"]))
+                    if target_stock < min_stock:
+                        st.warning(f"{item_name}: 적정재고는 최소재고보다 크거나 같아야 합니다.")
+                        error = True
+                        break
 
-                edit_submit = st.form_submit_button("💾 수정 저장")
+                    original = items[items["id"] == item_id].iloc[0]
 
-            if edit_submit:
-                if not edit_name.strip():
-                    st.warning("품목명을 입력하세요.")
-                elif edit_target < edit_min:
-                    st.warning("적정재고는 최소재고보다 크거나 같아야 합니다.")
-                else:
-                    update_item(
-                        selected_id,
-                        edit_warehouse,
-                        edit_name.strip(),
-                        edit_min,
-                        edit_target,
-                        edit_active
+                    changed = (
+                        original["warehouse"] != warehouse
+                        or original["item_name"] != item_name
+                        or int(original["min_stock"]) != min_stock
+                        or int(original["target_stock"]) != target_stock
+                        or int(original.get("unit_price", 0)) != unit_price
+                        or str(original.get("purchase_account", "기타")) != purchase_account
+                        or bool(original["is_active"]) != is_active
                     )
-                    st.success("품목 정보가 수정되었습니다.")
+
+                    if changed:
+                        update_item(
+                            item_id,
+                            warehouse,
+                            item_name,
+                            min_stock,
+                            target_stock,
+                            unit_price,
+                            purchase_account,
+                            is_active,
+                        )
+                        update_count += 1
+
+                if not error:
+                    st.success(f"변경사항이 저장되었습니다. 수정된 품목 수: {update_count}")
                     st.rerun()
 
     with tab3:
@@ -437,15 +545,17 @@ elif menu == "⚙ 품목관리":
             view["사용여부"] = view["is_active"].map({1: "사용", 0: "미사용"})
 
             st.dataframe(
-                view[["id", "warehouse", "item_name", "min_stock", "target_stock", "사용여부"]].rename(columns={
+                view[["id", "warehouse", "item_name", "min_stock", "target_stock", "unit_price", "purchase_account", "사용여부"]].rename(columns={
                     "id": "ID",
                     "warehouse": "창고",
                     "item_name": "품목명",
                     "min_stock": "최소재고",
-                    "target_stock": "적정재고"
+                    "target_stock": "적정재고",
+                    "unit_price": "단가",
+                    "purchase_account": "구매계정",
                 }),
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
             )
 
             options = items["id"].astype(str) + " | " + items["warehouse"] + " | " + items["item_name"]
@@ -499,7 +609,7 @@ elif menu == "🕒 조사이력":
         "current_stock",
         "min_stock",
         "target_stock",
-        "purchase_qty"
+        "purchase_qty",
     ]].rename(columns={
         "check_time": "조사일시",
         "checker": "입력자",
@@ -508,7 +618,7 @@ elif menu == "🕒 조사이력":
         "current_stock": "현재재고",
         "min_stock": "최소재고",
         "target_stock": "적정재고",
-        "purchase_qty": "구매 필요량"
+        "purchase_qty": "구매 필요량",
     })
 
     st.dataframe(view, use_container_width=True, hide_index=True)
@@ -517,5 +627,5 @@ elif menu == "🕒 조사이력":
         "📥 조사이력 엑셀 다운로드",
         data=to_excel(view),
         file_name="안전창고_조사이력.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
