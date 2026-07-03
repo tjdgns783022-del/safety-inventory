@@ -1,7 +1,8 @@
 # Main.py
-# 안전창고 재고관리 시스템 V5.4
-# 목적: 창고별 재고조사 + 구매필요목록 확인 + 엑셀 출력
-# 입고/출고 기능 제거 버전
+# 안전창고 재고관리 시스템 V5.4.1
+# 재고현황: 전체 선택 삭제
+# 품목관리: 보관위치(1창고, 2창고, 기자재실) 등록/수정
+# 재고현황: 선택한 보관위치 품목만 조회 및 현재재고 수정
 
 import streamlit as st
 import pandas as pd
@@ -10,12 +11,12 @@ from io import BytesIO
 from supabase import create_client, Client
 
 st.set_page_config(
-    page_title="안전창고 재고관리 시스템 V5.4",
+    page_title="안전창고 재고관리 시스템 V5.4.1",
     page_icon="📦",
     layout="wide"
 )
 
-APP_VERSION = "V5.4"
+APP_VERSION = "V5.4.1"
 
 PURCHASE_ACCOUNTS = ["일반수선비", "안전보호구"]
 
@@ -28,9 +29,6 @@ WAREHOUSE_MAP = {
 WAREHOUSE_NAMES = ["1창고", "2창고", "기자재실"]
 
 
-# =========================================================
-# Supabase 연결
-# =========================================================
 @st.cache_resource
 def init_supabase() -> Client:
     url = st.secrets["SUPABASE_URL"]
@@ -41,9 +39,6 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 
-# =========================================================
-# 공통 함수
-# =========================================================
 def now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -67,26 +62,27 @@ def normalize_account(value):
     return "일반수선비"
 
 
+def normalize_location(value):
+    if value in WAREHOUSE_NAMES:
+        return value
+    return "1창고"
+
+
 def to_excel_bytes(df_dict):
     output = BytesIO()
-
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for sheet_name, df in df_dict.items():
-            safe_sheet_name = str(sheet_name)[:31]
-            df.to_excel(writer, index=False, sheet_name=safe_sheet_name)
-
+            df.to_excel(writer, index=False, sheet_name=str(sheet_name)[:31])
     output.seek(0)
     return output.getvalue()
 
 
-# =========================================================
-# 데이터 조회
-# =========================================================
 def load_items():
     required_cols = {
         "id": 0,
         "item_name": "",
         "unit": "EA",
+        "storage_location": "1창고",
         "warehouse_1_qty": 0,
         "warehouse_2_qty": 0,
         "material_room_qty": 0,
@@ -121,6 +117,7 @@ def load_items():
 
         df["item_name"] = df["item_name"].fillna("").astype(str)
         df["unit"] = df["unit"].fillna("EA").astype(str)
+        df["storage_location"] = df["storage_location"].apply(normalize_location)
         df["purchase_account"] = df["purchase_account"].apply(normalize_account)
 
         return df[list(required_cols.keys())]
@@ -130,13 +127,11 @@ def load_items():
         return pd.DataFrame(columns=list(required_cols.keys()))
 
 
-# =========================================================
-# 데이터 저장
-# =========================================================
-def add_item(item_name, unit, optimal_stock, unit_price, purchase_account):
+def add_item(item_name, unit, storage_location, optimal_stock, unit_price, purchase_account):
     data = {
         "item_name": item_name.strip(),
         "unit": unit.strip() if unit else "EA",
+        "storage_location": normalize_location(storage_location),
         "warehouse_1_qty": 0,
         "warehouse_2_qty": 0,
         "material_room_qty": 0,
@@ -155,10 +150,11 @@ def add_item(item_name, unit, optimal_stock, unit_price, purchase_account):
         return False
 
 
-def update_item(item_id, item_name, unit, optimal_stock, unit_price, purchase_account):
+def update_item(item_id, item_name, unit, storage_location, optimal_stock, unit_price, purchase_account):
     data = {
         "item_name": item_name.strip(),
         "unit": unit.strip() if unit else "EA",
+        "storage_location": normalize_location(storage_location),
         "optimal_stock": safe_int(optimal_stock),
         "unit_price": safe_int(unit_price),
         "purchase_account": normalize_account(purchase_account),
@@ -182,22 +178,6 @@ def delete_item(item_id):
         return False
 
 
-def update_stock_all(item_id, warehouse_1_qty, warehouse_2_qty, material_room_qty):
-    data = {
-        "warehouse_1_qty": safe_int(warehouse_1_qty),
-        "warehouse_2_qty": safe_int(warehouse_2_qty),
-        "material_room_qty": safe_int(material_room_qty),
-        "updated_at": now_text()
-    }
-
-    try:
-        supabase.table("items").update(data).eq("id", item_id).execute()
-        return True
-    except Exception as e:
-        st.error(f"재고 저장 오류: {e}")
-        return False
-
-
 def update_stock_one(item_id, warehouse_col, qty):
     data = {
         warehouse_col: safe_int(qty),
@@ -212,53 +192,8 @@ def update_stock_one(item_id, warehouse_col, qty):
         return False
 
 
-# =========================================================
-# 표시용 데이터 생성
-# =========================================================
-def make_inventory_all_df(df):
-    result = df.copy()
-
-    result["합계"] = (
-        result["warehouse_1_qty"]
-        + result["warehouse_2_qty"]
-        + result["material_room_qty"]
-    )
-    result["총금액"] = result["합계"] * result["unit_price"]
-    result["재고상태"] = result.apply(
-        lambda row: "구매필요" if safe_int(row["합계"]) < safe_int(row["optimal_stock"]) else "정상",
-        axis=1
-    )
-
-    result = result.rename(columns={
-        "id": "ID",
-        "item_name": "품목명",
-        "unit": "단위",
-        "warehouse_1_qty": "1창고",
-        "warehouse_2_qty": "2창고",
-        "material_room_qty": "기자재실",
-        "optimal_stock": "적정재고",
-        "unit_price": "단가",
-        "purchase_account": "구매계정"
-    })
-
-    return result[[
-        "ID",
-        "품목명",
-        "단위",
-        "1창고",
-        "2창고",
-        "기자재실",
-        "합계",
-        "적정재고",
-        "단가",
-        "구매계정",
-        "총금액",
-        "재고상태"
-    ]]
-
-
-def make_inventory_one_df(df, warehouse_name):
-    warehouse_col = WAREHOUSE_MAP[warehouse_name]
+def make_inventory_df(df, selected_warehouse):
+    warehouse_col = WAREHOUSE_MAP[selected_warehouse]
 
     result = df.copy()
     result["현재재고"] = result[warehouse_col]
@@ -272,6 +207,7 @@ def make_inventory_one_df(df, warehouse_name):
         "id": "ID",
         "item_name": "품목명",
         "unit": "단위",
+        "storage_location": "보관위치",
         "optimal_stock": "적정재고",
         "unit_price": "단가",
         "purchase_account": "구매계정"
@@ -281,6 +217,7 @@ def make_inventory_one_df(df, warehouse_name):
         "ID",
         "품목명",
         "단위",
+        "보관위치",
         "현재재고",
         "적정재고",
         "단가",
@@ -290,17 +227,16 @@ def make_inventory_one_df(df, warehouse_name):
     ]]
 
 
-def make_purchase_df(df, stock_base):
+def make_purchase_df(df, selected_location, account_filter, sort_option):
     result = df.copy()
 
-    if stock_base == "전체":
-        result["현재재고"] = (
-            result["warehouse_1_qty"]
-            + result["warehouse_2_qty"]
-            + result["material_room_qty"]
-        )
-    else:
-        result["현재재고"] = result[WAREHOUSE_MAP[stock_base]]
+    if selected_location != "전체":
+        result = result[result["storage_location"] == selected_location].copy()
+
+    result["현재재고"] = result.apply(
+        lambda row: safe_int(row[WAREHOUSE_MAP[normalize_location(row["storage_location"])]]),
+        axis=1
+    )
 
     result["구매필요수량"] = result["optimal_stock"] - result["현재재고"]
     result["구매필요수량"] = result["구매필요수량"].apply(lambda x: x if x > 0 else 0)
@@ -308,47 +244,40 @@ def make_purchase_df(df, stock_base):
 
     result = result[result["구매필요수량"] > 0].copy()
 
+    if account_filter != "전체":
+        result = result[result["purchase_account"] == account_filter].copy()
+
     result = result.rename(columns={
         "item_name": "품목명",
         "unit": "단위",
-        "warehouse_1_qty": "1창고",
-        "warehouse_2_qty": "2창고",
-        "material_room_qty": "기자재실",
+        "storage_location": "보관위치",
         "optimal_stock": "적정재고",
         "unit_price": "단가",
         "purchase_account": "구매계정"
     })
 
-    if stock_base == "전체":
-        return result[[
-            "품목명",
-            "단위",
-            "1창고",
-            "2창고",
-            "기자재실",
-            "현재재고",
-            "적정재고",
-            "구매필요수량",
-            "단가",
-            "구매금액",
-            "구매계정"
-        ]]
+    result = result[[
+        "품목명",
+        "단위",
+        "보관위치",
+        "현재재고",
+        "적정재고",
+        "구매필요수량",
+        "단가",
+        "구매금액",
+        "구매계정"
+    ]]
+
+    if sort_option == "구매금액 큰순":
+        result = result.sort_values("구매금액", ascending=False)
+    elif sort_option == "구매필요수량 큰순":
+        result = result.sort_values("구매필요수량", ascending=False)
     else:
-        return result[[
-            "품목명",
-            "단위",
-            "현재재고",
-            "적정재고",
-            "구매필요수량",
-            "단가",
-            "구매금액",
-            "구매계정"
-        ]]
+        result = result.sort_values("품목명", ascending=True)
+
+    return result
 
 
-# =========================================================
-# 앱 시작
-# =========================================================
 st.title(f"📦 안전창고 재고관리 시스템 {APP_VERSION}")
 
 menu = st.sidebar.radio(
@@ -363,9 +292,6 @@ menu = st.sidebar.radio(
 items_df = load_items()
 
 
-# =========================================================
-# 재고현황
-# =========================================================
 if menu == "재고현황":
     st.subheader("📋 재고현황 / 창고별 재고조사")
 
@@ -373,116 +299,67 @@ if menu == "재고현황":
 
     with col1:
         selected_warehouse = st.selectbox(
-            "창고 선택",
-            ["전체"] + WAREHOUSE_NAMES
+            "보관위치 선택",
+            WAREHOUSE_NAMES
         )
 
     with col2:
         keyword = st.text_input("품목명 검색")
 
     df = items_df.copy()
+    df = df[df["storage_location"] == selected_warehouse].copy()
 
     if keyword:
         df = df[df["item_name"].astype(str).str.contains(keyword, case=False, na=False)]
 
     if df.empty:
-        st.info("등록된 품목이 없습니다.")
+        st.info(f"{selected_warehouse}에 등록된 품목이 없습니다.")
     else:
-        if selected_warehouse == "전체":
-            st.info("전체 선택 시 1창고, 2창고, 기자재실 재고를 모두 수정할 수 있습니다.")
+        st.info(f"{selected_warehouse}에 등록된 품목만 표시됩니다. 현재재고만 수정할 수 있습니다.")
 
-            display_df = make_inventory_all_df(df)
+        display_df = make_inventory_df(df, selected_warehouse)
 
-            edited_df = st.data_editor(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                disabled=[
-                    "ID",
-                    "품목명",
-                    "단위",
-                    "합계",
-                    "적정재고",
-                    "단가",
-                    "구매계정",
-                    "총금액",
-                    "재고상태"
-                ],
-                column_config={
-                    "1창고": st.column_config.NumberColumn("1창고", min_value=0, step=1),
-                    "2창고": st.column_config.NumberColumn("2창고", min_value=0, step=1),
-                    "기자재실": st.column_config.NumberColumn("기자재실", min_value=0, step=1)
-                }
-            )
+        edited_df = st.data_editor(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[
+                "ID",
+                "품목명",
+                "단위",
+                "보관위치",
+                "적정재고",
+                "단가",
+                "구매계정",
+                "총금액",
+                "재고상태"
+            ],
+            column_config={
+                "현재재고": st.column_config.NumberColumn(
+                    "현재재고",
+                    min_value=0,
+                    step=1
+                )
+            }
+        )
 
-            if st.button("재고 저장", type="primary"):
-                success_count = 0
+        if st.button("재고 저장", type="primary"):
+            success_count = 0
+            warehouse_col = WAREHOUSE_MAP[selected_warehouse]
 
-                for _, row in edited_df.iterrows():
-                    if update_stock_all(
-                        row["ID"],
-                        row["1창고"],
-                        row["2창고"],
-                        row["기자재실"]
-                    ):
-                        success_count += 1
+            for _, row in edited_df.iterrows():
+                if update_stock_one(row["ID"], warehouse_col, row["현재재고"]):
+                    success_count += 1
 
-                st.success(f"재고가 저장되었습니다. 저장 품목 수: {success_count}개")
-                st.rerun()
-
-            metric_df = make_inventory_all_df(df)
-
-        else:
-            st.info(f"{selected_warehouse} 재고만 수정할 수 있습니다.")
-
-            display_df = make_inventory_one_df(df, selected_warehouse)
-
-            edited_df = st.data_editor(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                disabled=[
-                    "ID",
-                    "품목명",
-                    "단위",
-                    "적정재고",
-                    "단가",
-                    "구매계정",
-                    "총금액",
-                    "재고상태"
-                ],
-                column_config={
-                    "현재재고": st.column_config.NumberColumn("현재재고", min_value=0, step=1)
-                }
-            )
-
-            if st.button("재고 저장", type="primary"):
-                success_count = 0
-                warehouse_col = WAREHOUSE_MAP[selected_warehouse]
-
-                for _, row in edited_df.iterrows():
-                    if update_stock_one(
-                        row["ID"],
-                        warehouse_col,
-                        row["현재재고"]
-                    ):
-                        success_count += 1
-
-                st.success(f"{selected_warehouse} 재고가 저장되었습니다. 저장 품목 수: {success_count}개")
-                st.rerun()
-
-            metric_df = make_inventory_one_df(df, selected_warehouse)
+            st.success(f"{selected_warehouse} 재고가 저장되었습니다. 저장 품목 수: {success_count}개")
+            st.rerun()
 
         m1, m2, m3 = st.columns(3)
+        m1.metric("표시 품목 수", f"{len(display_df):,}개")
+        m2.metric("구매필요 품목 수", f"{len(display_df[display_df['재고상태'] == '구매필요']):,}개")
+        m3.metric("표시 재고금액", format_won(display_df["총금액"].sum()))
 
-        m1.metric("표시 품목 수", f"{len(metric_df):,}개")
-        m2.metric("구매필요 품목 수", f"{len(metric_df[metric_df['재고상태'] == '구매필요']):,}개")
-        m3.metric("표시 기준 재고금액", format_won(metric_df["총금액"].sum()))
 
-
-# =========================================================
-# 품목관리
-# =========================================================
 elif menu == "품목관리":
     st.subheader("🛠 품목관리")
 
@@ -497,6 +374,7 @@ elif menu == "품목관리":
             with col1:
                 item_name = st.text_input("품목명")
                 unit = st.text_input("단위", value="EA")
+                storage_location = st.selectbox("보관위치", WAREHOUSE_NAMES)
 
             with col2:
                 optimal_stock = st.number_input("적정재고", min_value=0, step=1)
@@ -514,6 +392,7 @@ elif menu == "품목관리":
                     if add_item(
                         item_name,
                         unit,
+                        storage_location,
                         optimal_stock,
                         unit_price,
                         purchase_account
@@ -528,12 +407,15 @@ elif menu == "품목관리":
             st.info("등록된 품목이 없습니다.")
         else:
             item_options = {
-                f"{row['id']} - {row['item_name']}": row
+                f"{row['id']} - {row['storage_location']} - {row['item_name']}": row
                 for _, row in items_df.iterrows()
             }
 
             selected_label = st.selectbox("수정할 품목 선택", list(item_options.keys()))
             selected_item = item_options[selected_label]
+
+            current_location = normalize_location(selected_item.get("storage_location", "1창고"))
+            current_account = normalize_account(selected_item.get("purchase_account", "일반수선비"))
 
             with st.form("edit_item_form"):
                 col1, col2 = st.columns(2)
@@ -546,6 +428,11 @@ elif menu == "품목관리":
                     edit_unit = st.text_input(
                         "단위",
                         value=str(selected_item.get("unit", "EA"))
+                    )
+                    edit_storage_location = st.selectbox(
+                        "보관위치",
+                        WAREHOUSE_NAMES,
+                        index=WAREHOUSE_NAMES.index(current_location)
                     )
 
                 with col2:
@@ -561,11 +448,6 @@ elif menu == "품목관리":
                         step=100,
                         value=safe_int(selected_item.get("unit_price", 0))
                     )
-
-                    current_account = normalize_account(
-                        selected_item.get("purchase_account", "일반수선비")
-                    )
-
                     edit_purchase_account = st.selectbox(
                         "구매계정",
                         PURCHASE_ACCOUNTS,
@@ -587,6 +469,7 @@ elif menu == "품목관리":
                             selected_item["id"],
                             edit_item_name,
                             edit_unit,
+                            edit_storage_location,
                             edit_optimal_stock,
                             edit_unit_price,
                             edit_purchase_account
@@ -600,9 +483,6 @@ elif menu == "품목관리":
                         st.rerun()
 
 
-# =========================================================
-# 구매필요목록
-# =========================================================
 elif menu == "구매필요목록":
     st.subheader("🛒 구매필요목록")
 
@@ -612,8 +492,8 @@ elif menu == "구매필요목록":
         filter_col1, filter_col2, filter_col3 = st.columns(3)
 
         with filter_col1:
-            stock_base = st.selectbox(
-                "재고 기준",
+            location_filter = st.selectbox(
+                "보관위치",
                 ["전체"] + WAREHOUSE_NAMES
             )
 
@@ -629,17 +509,12 @@ elif menu == "구매필요목록":
                 ["구매금액 큰순", "구매필요수량 큰순", "품목명순"]
             )
 
-        purchase_df = make_purchase_df(items_df, stock_base)
-
-        if account_filter != "전체":
-            purchase_df = purchase_df[purchase_df["구매계정"] == account_filter]
-
-        if sort_option == "구매금액 큰순":
-            purchase_df = purchase_df.sort_values("구매금액", ascending=False)
-        elif sort_option == "구매필요수량 큰순":
-            purchase_df = purchase_df.sort_values("구매필요수량", ascending=False)
-        else:
-            purchase_df = purchase_df.sort_values("품목명", ascending=True)
+        purchase_df = make_purchase_df(
+            items_df,
+            location_filter,
+            account_filter,
+            sort_option
+        )
 
         if purchase_df.empty:
             st.success("현재 구매가 필요한 품목이 없습니다.")
