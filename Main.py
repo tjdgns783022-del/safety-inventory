@@ -1,8 +1,10 @@
 # Main.py
-# 안전창고 재고관리 시스템 V5.4.1
-# 재고현황: 전체 선택 삭제
-# 품목관리: 보관위치(1창고, 2창고, 기자재실) 등록/수정
-# 재고현황: 선택한 보관위치 품목만 조회 및 현재재고 수정
+# 안전창고 재고관리 시스템 V5.4.2
+# 개선사항:
+# - 품목 수정/삭제를 드롭다운 방식에서 전체 표 직접 수정 방식으로 변경
+# - 동일 품목은 여러 창고에 등록 가능
+# - 단, 같은 보관위치 + 같은 품목명 중복 등록은 경고
+# - 재고 수량은 재고현황에서만 수정
 
 import streamlit as st
 import pandas as pd
@@ -11,12 +13,12 @@ from io import BytesIO
 from supabase import create_client, Client
 
 st.set_page_config(
-    page_title="안전창고 재고관리 시스템 V5.4.1",
+    page_title="안전창고 재고관리 시스템 V5.4.2",
     page_icon="📦",
     layout="wide"
 )
 
-APP_VERSION = "V5.4.1"
+APP_VERSION = "V5.4.2"
 
 PURCHASE_ACCOUNTS = ["일반수선비", "안전보호구"]
 
@@ -127,9 +129,32 @@ def load_items():
         return pd.DataFrame(columns=list(required_cols.keys()))
 
 
-def add_item(item_name, unit, storage_location, optimal_stock, unit_price, purchase_account):
+def is_duplicate_item(df, item_name, storage_location, exclude_id=None):
+    check_df = df.copy()
+    check_df["item_name_clean"] = check_df["item_name"].astype(str).str.strip()
+
+    item_name = str(item_name).strip()
+
+    duplicated = check_df[
+        (check_df["item_name_clean"] == item_name) &
+        (check_df["storage_location"] == storage_location)
+    ]
+
+    if exclude_id is not None:
+        duplicated = duplicated[duplicated["id"] != exclude_id]
+
+    return not duplicated.empty
+
+
+def add_item(item_name, unit, storage_location, optimal_stock, unit_price, purchase_account, items_df):
+    item_name = item_name.strip()
+
+    if is_duplicate_item(items_df, item_name, storage_location):
+        st.warning("같은 보관위치에 동일한 품목명이 이미 등록되어 있습니다.")
+        return False
+
     data = {
-        "item_name": item_name.strip(),
+        "item_name": item_name,
         "unit": unit.strip() if unit else "EA",
         "storage_location": normalize_location(storage_location),
         "warehouse_1_qty": 0,
@@ -152,8 +177,8 @@ def add_item(item_name, unit, storage_location, optimal_stock, unit_price, purch
 
 def update_item(item_id, item_name, unit, storage_location, optimal_stock, unit_price, purchase_account):
     data = {
-        "item_name": item_name.strip(),
-        "unit": unit.strip() if unit else "EA",
+        "item_name": str(item_name).strip(),
+        "unit": str(unit).strip() if unit else "EA",
         "storage_location": normalize_location(storage_location),
         "optimal_stock": safe_int(optimal_stock),
         "unit_price": safe_int(unit_price),
@@ -363,7 +388,7 @@ if menu == "재고현황":
 elif menu == "품목관리":
     st.subheader("🛠 품목관리")
 
-    tab1, tab2 = st.tabs(["품목 등록", "품목 수정 / 삭제"])
+    tab1, tab2 = st.tabs(["품목 등록", "품목 조회 / 수정 / 삭제"])
 
     with tab1:
         st.markdown("### 신규 품목 등록")
@@ -381,6 +406,7 @@ elif menu == "품목관리":
                 unit_price = st.number_input("단가", min_value=0, step=100)
                 purchase_account = st.selectbox("구매계정", PURCHASE_ACCOUNTS)
 
+            st.info("동일 품목은 다른 보관위치에 중복 등록할 수 있습니다. 단, 같은 보관위치에 같은 품목명은 중복 등록을 권장하지 않습니다.")
             st.info("재고 수량은 재고현황 메뉴에서만 입력합니다.")
 
             submitted = st.form_submit_button("등록")
@@ -395,92 +421,154 @@ elif menu == "품목관리":
                         storage_location,
                         optimal_stock,
                         unit_price,
-                        purchase_account
+                        purchase_account,
+                        items_df
                     ):
                         st.success("품목이 등록되었습니다.")
                         st.rerun()
 
     with tab2:
-        st.markdown("### 기존 품목 수정 / 삭제")
+        st.markdown("### 등록 품목 전체 조회 / 수정 / 삭제")
 
         if items_df.empty:
             st.info("등록된 품목이 없습니다.")
         else:
-            item_options = {
-                f"{row['id']} - {row['storage_location']} - {row['item_name']}": row
-                for _, row in items_df.iterrows()
-            }
+            keyword = st.text_input("품목명 검색", key="edit_keyword")
+            location_filter = st.selectbox("보관위치 필터", ["전체"] + WAREHOUSE_NAMES)
+            account_filter = st.selectbox("구매계정 필터", ["전체"] + PURCHASE_ACCOUNTS)
 
-            selected_label = st.selectbox("수정할 품목 선택", list(item_options.keys()))
-            selected_item = item_options[selected_label]
+            edit_df = items_df.copy()
 
-            current_location = normalize_location(selected_item.get("storage_location", "1창고"))
-            current_account = normalize_account(selected_item.get("purchase_account", "일반수선비"))
+            if keyword:
+                edit_df = edit_df[
+                    edit_df["item_name"].astype(str).str.contains(keyword, case=False, na=False)
+                ]
 
-            with st.form("edit_item_form"):
-                col1, col2 = st.columns(2)
+            if location_filter != "전체":
+                edit_df = edit_df[edit_df["storage_location"] == location_filter]
 
-                with col1:
-                    edit_item_name = st.text_input(
-                        "품목명",
-                        value=str(selected_item.get("item_name", ""))
-                    )
-                    edit_unit = st.text_input(
-                        "단위",
-                        value=str(selected_item.get("unit", "EA"))
-                    )
-                    edit_storage_location = st.selectbox(
-                        "보관위치",
-                        WAREHOUSE_NAMES,
-                        index=WAREHOUSE_NAMES.index(current_location)
-                    )
+            if account_filter != "전체":
+                edit_df = edit_df[edit_df["purchase_account"] == account_filter]
 
-                with col2:
-                    edit_optimal_stock = st.number_input(
-                        "적정재고",
-                        min_value=0,
-                        step=1,
-                        value=safe_int(selected_item.get("optimal_stock", 0))
-                    )
-                    edit_unit_price = st.number_input(
-                        "단가",
-                        min_value=0,
-                        step=100,
-                        value=safe_int(selected_item.get("unit_price", 0))
-                    )
-                    edit_purchase_account = st.selectbox(
-                        "구매계정",
-                        PURCHASE_ACCOUNTS,
-                        index=PURCHASE_ACCOUNTS.index(current_account)
-                    )
+            if edit_df.empty:
+                st.info("조회된 품목이 없습니다.")
+            else:
+                table_df = edit_df[[
+                    "id",
+                    "storage_location",
+                    "item_name",
+                    "unit",
+                    "optimal_stock",
+                    "unit_price",
+                    "purchase_account"
+                ]].copy()
 
-                st.info("재고 수량은 재고현황 메뉴에서만 수정합니다.")
+                table_df["삭제"] = False
+
+                table_df = table_df.rename(columns={
+                    "id": "ID",
+                    "storage_location": "보관위치",
+                    "item_name": "품목명",
+                    "unit": "단위",
+                    "optimal_stock": "적정재고",
+                    "unit_price": "단가",
+                    "purchase_account": "구매계정"
+                })
+
+                edited_items_df = st.data_editor(
+                    table_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["ID"],
+                    column_config={
+                        "보관위치": st.column_config.SelectboxColumn(
+                            "보관위치",
+                            options=WAREHOUSE_NAMES,
+                            required=True
+                        ),
+                        "품목명": st.column_config.TextColumn(
+                            "품목명",
+                            required=True
+                        ),
+                        "단위": st.column_config.TextColumn(
+                            "단위",
+                            required=True
+                        ),
+                        "적정재고": st.column_config.NumberColumn(
+                            "적정재고",
+                            min_value=0,
+                            step=1
+                        ),
+                        "단가": st.column_config.NumberColumn(
+                            "단가",
+                            min_value=0,
+                            step=100
+                        ),
+                        "구매계정": st.column_config.SelectboxColumn(
+                            "구매계정",
+                            options=PURCHASE_ACCOUNTS,
+                            required=True
+                        ),
+                        "삭제": st.column_config.CheckboxColumn(
+                            "삭제"
+                        )
+                    }
+                )
 
                 col_save, col_delete = st.columns(2)
 
-                save_clicked = col_save.form_submit_button("수정 저장")
-                delete_clicked = col_delete.form_submit_button("삭제")
+                with col_save:
+                    if st.button("변경사항 저장", type="primary"):
+                        validation_ok = True
 
-                if save_clicked:
-                    if not edit_item_name.strip():
-                        st.warning("품목명을 입력해주세요.")
-                    else:
-                        if update_item(
-                            selected_item["id"],
-                            edit_item_name,
-                            edit_unit,
-                            edit_storage_location,
-                            edit_optimal_stock,
-                            edit_unit_price,
-                            edit_purchase_account
-                        ):
-                            st.success("품목 정보가 수정되었습니다.")
+                        check_df = edited_items_df.copy()
+                        check_df["품목명_clean"] = check_df["품목명"].astype(str).str.strip()
+
+                        if (check_df["품목명_clean"] == "").any():
+                            st.warning("품목명이 비어있는 행이 있습니다.")
+                            validation_ok = False
+
+                        duplicate_check = check_df[
+                            check_df.duplicated(subset=["보관위치", "품목명_clean"], keep=False)
+                        ]
+
+                        if not duplicate_check.empty:
+                            st.warning("같은 보관위치에 동일한 품목명이 중복되어 있습니다. 수정 후 다시 저장해주세요.")
+                            validation_ok = False
+
+                        if validation_ok:
+                            success_count = 0
+
+                            for _, row in edited_items_df.iterrows():
+                                if update_item(
+                                    row["ID"],
+                                    row["품목명"],
+                                    row["단위"],
+                                    row["보관위치"],
+                                    row["적정재고"],
+                                    row["단가"],
+                                    row["구매계정"]
+                                ):
+                                    success_count += 1
+
+                            st.success(f"변경사항이 저장되었습니다. 저장 품목 수: {success_count}개")
                             st.rerun()
 
-                if delete_clicked:
-                    if delete_item(selected_item["id"]):
-                        st.success("품목이 삭제되었습니다.")
-                        st.rerun()
+                with col_delete:
+                    if st.button("선택 품목 삭제"):
+                        delete_df = edited_items_df[edited_items_df["삭제"] == True]
+
+                        if delete_df.empty:
+                            st.warning("삭제할 품목을 선택해주세요.")
+                        else:
+                            success_count = 0
+
+                            for _, row in delete_df.iterrows():
+                                if delete_item(row["ID"]):
+                                    success_count += 1
+
+                            st.success(f"선택 품목이 삭제되었습니다. 삭제 품목 수: {success_count}개")
+                            st.rerun()
 
 
 elif menu == "구매필요목록":
