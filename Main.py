@@ -362,12 +362,13 @@ elif menu == "🛒 구매필요목록":
             "구매 필요량",
             "단가",
             "총 금액",
-        ]]
-
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        ]].copy()
 
         total_amount = int(view["총 금액"].sum())
-        st.metric("총 구매예상금액", money_text(total_amount))
+
+        st.metric("총 구매예상금액", f"{total_amount:,} 원")
+
+        st.subheader("구매계정별 합계")
 
         account_summary = (
             view.groupby("구매계정", as_index=False)["총 금액"]
@@ -375,8 +376,24 @@ elif menu == "🛒 구매필요목록":
             .sort_values("총 금액", ascending=False)
         )
 
-        st.subheader("구매계정별 합계")
         st.dataframe(account_summary, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        st.subheader("구매계정별 상세 목록")
+
+        for account in account_summary["구매계정"]:
+            account_df = view[view["구매계정"] == account]
+            account_total = int(account_df["총 금액"].sum())
+
+            with st.expander(f"📁 {account} / 합계 {account_total:,} 원", expanded=True):
+                st.dataframe(
+                    account_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+        st.divider()
 
         st.download_button(
             "📥 구매필요목록 엑셀 다운로드",
