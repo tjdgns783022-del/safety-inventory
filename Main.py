@@ -71,10 +71,10 @@ def get_items(active_only=True):
         df["unit_price"] = 0
 
     if "purchase_account" not in df.columns:
-        df["purchase_account"] = "기타"
+        df["purchase_account"] = "일반수선비"
 
     df["unit_price"] = df["unit_price"].fillna(0).astype(int)
-    df["purchase_account"] = df["purchase_account"].fillna("기타")
+    df["purchase_account"] = df["purchase_account"].fillna("일반수선비")
 
     return df
 
@@ -133,7 +133,7 @@ def get_latest_stock():
             "구매 필요량": purchase_qty,
             "단가": unit_price,
             "총 금액": total_price,
-            "구매계정": item.get("purchase_account", "기타"),
+            "구매계정": item.get("purchase_account", "일반수선비"),
         })
 
     return pd.DataFrame(result).sort_values(["창고", "품목명"])
@@ -245,7 +245,7 @@ if menu == "📦 재고조사":
 
             with col1:
                 st.markdown(f"### {item['item_name']}")
-                st.caption(f"구매계정: {item.get('purchase_account', '기타')} / 단가: {int(item.get('unit_price', 0)):,}원")
+                st.caption(f"구매계정: {item.get('purchase_account', '일반수선비')} / 단가: {int(item.get('unit_price', 0)):,}원")
 
             with col2:
                 st.write(f"최소: {int(item['min_stock'])}")
@@ -410,7 +410,7 @@ elif menu == "⚙ 품목관리":
             min_stock = st.number_input("최소재고", min_value=0, step=1)
             target_stock = st.number_input("적정재고", min_value=0, step=1)
             unit_price = st.number_input("단가", min_value=0, step=100)
-            purchase_account = st.selectbox("구매계정", PURCHASE_ACCOUNTS, index=PURCHASE_ACCOUNTS.index("기타"))
+            purchase_account = st.selectbox("구매계정", PURCHASE_ACCOUNTS, index=0)
 
             submitted = st.form_submit_button("➕ 품목 추가")
 
@@ -470,7 +470,7 @@ elif menu == "⚙ 품목관리":
             })
 
             edit_df["사용 중"] = edit_df["사용 중"].map({1: True, 0: False})
-            edit_df["구매계정"] = edit_df["구매계정"].fillna("기타")
+            edit_df["구매계정"] = edit_df["구매계정"].fillna("일반수선비")
 
             edited_df = st.data_editor(
                 edit_df,
@@ -500,7 +500,7 @@ elif menu == "⚙ 품목관리":
                     min_stock = int(row["최소재고"])
                     target_stock = int(row["적정재고"])
                     unit_price = int(row["단가"])
-                    purchase_account = str(row["구매계정"]).strip() or "기타"
+                    purchase_account = str(row["구매계정"]).strip() or "일반수선비"
                     is_active = bool(row["사용 중"])
 
                     if not item_name:
@@ -521,7 +521,7 @@ elif menu == "⚙ 품목관리":
                         or int(original["min_stock"]) != min_stock
                         or int(original["target_stock"]) != target_stock
                         or int(original.get("unit_price", 0)) != unit_price
-                        or str(original.get("purchase_account", "기타")) != purchase_account
+                        or str(original.get("purchase_account", "일반수선비")) != purchase_account
                         or bool(original["is_active"]) != is_active
                     )
 
