@@ -6,23 +6,16 @@ import streamlit as st
 from supabase import create_client
 
 
-APP_TITLE = "📦 안전창고 재고관리 V5.1"
+APP_TITLE = "📦 안전창고 재고관리 V5.3"
 
 PURCHASE_ACCOUNTS = [
-    "안전용품",
-    "소방용품",
-    "전기자재",
-    "기계자재",
-    "시설유지",
-    "소모품",
-    "사무용품",
-    "청소용품",
-    "기타",
+    "일반수선비",
+    "안전보호구",
 ]
 
 
 st.set_page_config(
-    page_title="안전창고 재고관리 V5.1",
+    page_title="안전창고 재고관리 V5.3",
     page_icon="📦",
     layout="wide",
 )
